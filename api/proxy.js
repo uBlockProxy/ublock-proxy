@@ -24,6 +24,14 @@ const BLOCKED_PATH_PATTERNS = [
   /\/beacon/i, /\/prebid/i, /\/adsense/i, /\/adsbygoogle/i, /ads\.js$/i
 ];
 
+// Fallback logic in case the GitHub JSON list is missing EasyList domains
+const FALLBACK_REGEXES = [
+  /ads?[0-9a-z.-]*\.(google|doubleclick|adcolony|media|twitter|linkedin|pinterest|reddit|youtube|tiktok|yahoo|amazon)\.com/i,
+  /analytics/i, /track/i, /pixel/i, /stats\./i, /hotjar/i, /mouseflow/i, /freshmarketer/i,
+  /luckyorange/i, /bugsnag/i, /getsentry/i, /facebook\.com/i, /yandex/i, /unityads/i, /metrics/i,
+  /hicloud/i, /samsung/i, /xiaomi/i, /oppomobile/i, /realme/i, /apple\.com/i
+];
+
 async function loadFilterLists() {
   if (listsLoaded) return;
   try {
@@ -57,6 +65,9 @@ function isBlocked(urlStr) {
     for (const pat of BLOCKED_PATH_PATTERNS) {
       if (pat.test(pathAndQuery)) return true;
     }
+    for (const pat of FALLBACK_REGEXES) {
+      if (pat.test(urlStr)) return true;
+    }
   } catch { }
   return false;
 }
@@ -76,21 +87,41 @@ const STRIP_HEADERS = new Set([
   'content-encoding', 'content-length', 'transfer-encoding',
 ]);
 
-function createHtmlTransformStream(domainSet, cssString) {
+function createHtmlTransformStream() {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let headInjected = false;
   let tailBuffer = '';
 
-  const swBlocklist = JSON.stringify(Array.from(domainSet));
-  const swPatterns = JSON.stringify(BLOCKED_PATH_PATTERNS.map(p => p.source));
+  const fallbackCss = `.adbox.banner_ads.adsbox, .textads, .ad-banner, .ad-container { display: none !important; visibility: hidden !important; height: 0 !important; }`;
+  const cssToInject = (uboCosmeticCSS || '') + `<style id="proxy-cosmetic-fallback">${fallbackCss}</style>`;
 
   const HEAD_INJECT_JS = `<script id="proxy-early-injection">
   (function(){
     'use strict';
     
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/__proxy-sw.js', { scope: '/' }).catch(function(){});
+      // Unregister the stuck V1 Service Worker
+      navigator.serviceWorker.getRegistrations().then(function(regs) {
+        for(var i=0; i<regs.length; i++) {
+          if(regs[i].active && regs[i].active.scriptURL.includes('__proxy-sw.js')) {
+            regs[i].unregister();
+          }
+        }
+      });
+
+      // Register the V2 Service Worker
+      navigator.serviceWorker.register('/__proxy-sw-v2.js', { scope: '/' }).then(function(reg) {
+        reg.addEventListener('updatefound', function() {
+          var newWorker = reg.installing;
+          newWorker.addEventListener('statechange', function() {
+            if (newWorker.state === 'activated' && !navigator.serviceWorker.controller) {
+               // Reload instantly to activate the network interceptor
+               window.location.reload();
+            }
+          });
+        });
+      }).catch(function(){});
     }
 
     var AP=['adBlockDetected','blockAdBlock','fuckAdBlock','sniffAdBlock','google_ad_status','__ads','_carbonads','adsbygoogle'];
@@ -105,35 +136,33 @@ function createHtmlTransformStream(domainSet, cssString) {
     window.adsbygoogle=window.adsbygoogle||[];
     try{Object.defineProperty(window.adsbygoogle,'push',{value:function(){return this.length},writable:false})}catch(e){}
 
-    var BLOCKED_DOMAINS = new Set(${swBlocklist});
-    var patterns = ${swPatterns}.map(function(p){ return new RegExp(p, 'i') });
+    var blockPatterns = [
+      /\\/ads[\\/.?]/i, /\\/ad[\\/.?]/i, /\\/adserv/i, /\\/pagead/i, /\\/doubleclick/i,
+      /\\/analytics\\.js/i, /\\/gtag\\/js/i, /\\/gtm\\.js/i, /\\/pixel\\.js/i, /\\/tracker/i,
+      /ads?[0-9a-z.-]*\\.(google|doubleclick|adcolony|media|twitter|linkedin|pinterest|reddit|youtube|tiktok|yahoo|amazon)\\.com/i,
+      /analytics/i, /track/i, /pixel/i, /stats\\./i, /hotjar/i, /mouseflow/i, /freshmarketer/i,
+      /luckyorange/i, /bugsnag/i, /getsentry/i, /facebook\\.com/i, /yandex/i, /unityads/i, /metrics/i,
+      /hicloud/i, /samsung/i, /xiaomi/i, /oppomobile/i, /realme/i, /apple\\.com/i
+    ];
 
-    function checkBlock(urlStr) {
-      if (!urlStr) return false;
-      try {
-        var u = new URL(urlStr, window.location.href);
-        var parts = u.hostname.toLowerCase().split('.');
-        for (var i = 0; i < parts.length - 1; i++) {
-          if (BLOCKED_DOMAINS.has(parts.slice(i).join('.'))) return true;
-        }
-        var pathQuery = u.pathname + u.search;
-        for (var j = 0; j < patterns.length; j++) {
-          if (patterns[j].test(pathQuery)) return true;
-        }
-      } catch(e) {}
+    function isBad(url) {
+      if (!url) return false;
+      for (var i=0; i<blockPatterns.length; i++) {
+        if (blockPatterns[i].test(url)) return true;
+      }
       return false;
     }
 
     var originalFetch = window.fetch;
     window.fetch = async function(...args) {
       var reqUrl = typeof args[0] === 'string' ? args[0] : (args[0] ? args[0].url : '');
-      if (checkBlock(reqUrl)) return Promise.reject(new TypeError("Failed to fetch"));
+      if (isBad(reqUrl)) return Promise.reject(new TypeError("Failed to fetch"));
       return originalFetch.apply(this, args);
     };
 
     var originalXHROpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-      if (checkBlock(url)) {
+      if (isBad(url)) {
         this.send = function() { 
           Object.defineProperty(this, 'readyState', {get: function(){return 4}}); 
           Object.defineProperty(this, 'status', {get: function(){return 0}}); 
@@ -146,7 +175,6 @@ function createHtmlTransformStream(domainSet, cssString) {
   })();
   </script>`;
 
-  const cssToInject = cssString || `<style id="proxy-cosmetic-fallback">.ad-banner,.ad-container { display: none !important; }</style>`;
   const headPayload = cssToInject + HEAD_INJECT_JS;
 
   return new TransformStream({
@@ -204,14 +232,17 @@ export default async function handler(request) {
 
     const url = new URL(request.url);
 
-    if (url.pathname === '/__proxy-sw.js') {
+    // Serve the NEW V2 Service Worker
+    if (url.pathname === '/__proxy-sw-v2.js') {
       if (!cachedSwCode) {
         const swBlocklist = JSON.stringify(Array.from(uboDomains));
         const swPatterns = JSON.stringify(BLOCKED_PATH_PATTERNS.map(p => p.source));
+        const swFallback = JSON.stringify(FALLBACK_REGEXES.map(p => p.source));
 
         cachedSwCode = `
           const BLOCKED_DOMAINS = new Set(${swBlocklist});
           const patterns = ${swPatterns}.map(p => new RegExp(p, 'i'));
+          const fallbacks = ${swFallback}.map(p => new RegExp(p, 'i'));
 
           function checkBlock(urlStr) {
             try {
@@ -224,6 +255,9 @@ export default async function handler(request) {
               for (const reg of patterns) {
                 if (reg.test(pathQuery)) return true;
               }
+              for (const reg of fallbacks) {
+                if (reg.test(urlStr)) return true;
+              }
             } catch(e) {}
             return false;
           }
@@ -233,6 +267,7 @@ export default async function handler(request) {
 
           self.addEventListener('fetch', event => {
             if (checkBlock(event.request.url)) {
+              // Return hard network error so the Adblock test registers it as BLOCKED
               event.respondWith(Response.error());
             }
           });
@@ -242,7 +277,7 @@ export default async function handler(request) {
       return new Response(cachedSwCode, {
         headers: {
           'Content-Type': 'application/javascript',
-          'Cache-Control': 'public, max-age=3600'
+          'Cache-Control': 'no-cache' // Tell the browser not to cache this permanently
         }
       });
     }
@@ -306,7 +341,7 @@ export default async function handler(request) {
       return new Response(upstream.body, { status: upstream.status, headers: rH });
     }
 
-    const ts = createHtmlTransformStream(uboDomains, uboCosmeticCSS);
+    const ts = createHtmlTransformStream();
     upstream.body.pipeThrough(ts);
     rH.delete('content-length');
 
