@@ -142,7 +142,7 @@ function createHtmlTransformStream() {
       /ads?[0-9a-z.-]*\\.(google|doubleclick|adcolony|media|twitter|linkedin|pinterest|reddit|youtube|tiktok|yahoo|amazon)\\.com/i,
       /analytics/i, /track/i, /pixel/i, /stats\\./i, /hotjar/i, /mouseflow/i, /freshmarketer/i,
       /luckyorange/i, /bugsnag/i, /getsentry/i, /facebook\\.com/i, /yandex/i, /unityads/i, /metrics/i,
-      /hicloud/i, /samsung/i, /xiaomi/i, /oppomobile/i, /realme/i, /apple\\.com/i
+      /hicloud/i, /samsung/i, /xiaomi/i, /oppomobile/i, /realme/i, /apple\\.com/i, /yahoo/i, /byteoversea/i, /reddit/i, /adcolony/i, /pinterest/i, /sentry-cdn/i, /tiktok/i
     ];
 
     function isBad(url) {
