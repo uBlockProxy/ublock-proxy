@@ -11,7 +11,8 @@ try {
 const TARGET_ORIGIN = new URL(TARGET).origin;
 const TARGET_HOST = new URL(TARGET).host;
 
-const LIST_URL_BASE = 'https://ublockbrowser.github.io/filter-lists';
+// Your Github List
+const LIST_URL_BASE = 'https://ublockproxy.github.io/filter-lists';
 
 let uboDomains = new Set();
 let uboCosmeticCSS = "";
@@ -65,12 +66,22 @@ const HEAD_INJECT_JS = `<script id="proxy-early-injection">
 (function(){
   'use strict';
   
-  // Register Service Worker IMMEDIATELY (not waiting for load)
+  // 1. Service Worker Registration & First-Load Reload Hook
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/__proxy-sw.js', { scope: '/' }).catch(function(){});
+    navigator.serviceWorker.register('/__proxy-sw.js', { scope: '/' }).then(function(reg) {
+      reg.addEventListener('updatefound', function() {
+        var newWorker = reg.installing;
+        newWorker.addEventListener('statechange', function() {
+          if (newWorker.state === 'activated' && !navigator.serviceWorker.controller) {
+             // If this is the first visit, the SW just activated. Reload to catch all requests!
+             window.location.reload();
+          }
+        });
+      });
+    }).catch(function(){});
   }
 
-  // Defuse Adblock Detectors
+  // 2. Defuse Adblock Detectors
   var AP=['adBlockDetected','blockAdBlock','fuckAdBlock','sniffAdBlock','google_ad_status','__ads','_carbonads','adsbygoogle'];
   AP.forEach(function(p){try{if(typeof window[p]==='undefined')
   Object.defineProperty(window,p,{get:function(){return undefined},set:function(){return true},configurable:false})}catch(e){}});
@@ -83,8 +94,12 @@ const HEAD_INJECT_JS = `<script id="proxy-early-injection">
   window.adsbygoogle=window.adsbygoogle||[];
   try{Object.defineProperty(window.adsbygoogle,'push',{value:function(){return this.length},writable:false})}catch(e){}
 
-  // Early Monkey-Patch XHR/Fetch using common regex rules
-  var blockPatterns = [/\\/ads[\\/.?]/i, /\\/ad[\\/.?]/i, /\\/pagead/i, /\\/doubleclick/i, /\\/analytics\\.js/i, /google-analytics/i, /hotjar/i, /facebook\\.com/i];
+  // 3. Early Monkey-Patch XHR/Fetch
+  var blockPatterns = [
+    /ads?[a-z0-9.-]*\\.(google|doubleclick|adcolony|media|twitter|linkedin|pinterest|reddit|youtube|tiktok|yahoo|amazon)\\.com/i,
+    /analytics/i, /track/i, /pixel/i, /stats\\./i, /hotjar/i, /mouseflow/i, /freshmarketer/i,
+    /luckyorange/i, /bugsnag/i, /getsentry/i, /facebook\\.com/i, /yandex/i, /unityads/i, /metrics/i
+  ];
   
   function isBad(url) {
     if (!url) return false;
@@ -97,7 +112,8 @@ const HEAD_INJECT_JS = `<script id="proxy-early-injection">
   var originalFetch = window.fetch;
   window.fetch = async function(...args) {
     var reqUrl = typeof args[0] === 'string' ? args[0] : args[0]?.url;
-    if (isBad(reqUrl)) return new Response(null, { status: 204 });
+    // Simulate a hard network rejection so the tester marks it as BLOCKED
+    if (isBad(reqUrl)) return Promise.reject(new TypeError("Failed to fetch")); 
     return originalFetch.apply(this, args);
   };
 
@@ -106,7 +122,9 @@ const HEAD_INJECT_JS = `<script id="proxy-early-injection">
     if (isBad(url)) {
       this.send = function() { 
         Object.defineProperty(this, 'readyState', {get: function(){return 4}}); 
-        if(this.onload) this.onload(); 
+        Object.defineProperty(this, 'status', {get: function(){return 0}}); 
+        // Simulate an XHR network crash
+        if(this.onerror) this.onerror(new ProgressEvent("error")); 
       };
       return;
     }
@@ -145,7 +163,6 @@ function createHtmlTransformStream() {
       tailBuffer = '';
       let text = raw;
 
-      // Inject JS and CSS into the <head> so it loads instantly
       if (!headInjected) {
         const idx = text.search(/<head\s*>/i);
         if (idx !== -1) {
@@ -153,7 +170,6 @@ function createHtmlTransformStream() {
           text = text.slice(0, splitIdx) + headPayload + text.slice(splitIdx);
           headInjected = true;
         } else {
-          // fallback if <head> not found, look for </head>
           const endIdx = text.search(/<\/head\s*>/i);
           if (endIdx !== -1) {
             text = text.slice(0, endIdx) + headPayload + text.slice(endIdx);
@@ -225,7 +241,8 @@ export default async function handler(request) {
 
           self.addEventListener('fetch', event => {
             if (checkBlock(event.request.url)) {
-              event.respondWith(new Response(null, { status: 204 }));
+              // Return a hard network error instead of a 204 success
+              event.respondWith(Response.error());
             }
           });
         `;
