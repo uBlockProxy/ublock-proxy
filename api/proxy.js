@@ -11,7 +11,7 @@ try {
 const TARGET_ORIGIN = new URL(TARGET).origin;
 const TARGET_HOST = new URL(TARGET).host;
 
-const LIST_URL_BASE = 'https://ublockproxy.github.io/filter-lists';
+const LIST_URL_BASE = 'https://ublockbrowser.github.io/filter-lists';
 
 let uboDomains = new Set();
 let uboCosmeticCSS = "";
@@ -37,9 +37,7 @@ async function loadFilterLists() {
       uboDomains = new Set(domainsArray);
     }
 
-    if (cssRes.ok) {
-      uboCosmeticCSS = await cssRes.text();
-    }
+    if (cssRes.ok) uboCosmeticCSS = await cssRes.text();
 
     listsLoaded = true;
   } catch (error) { }
@@ -52,8 +50,7 @@ function isBlocked(urlStr) {
 
     const parts = host.split('.');
     for (let i = 0; i < parts.length - 1; i++) {
-      const candidate = parts.slice(i).join('.');
-      if (uboDomains.has(candidate)) return true;
+      if (uboDomains.has(parts.slice(i).join('.'))) return true;
     }
 
     const pathAndQuery = u.pathname + u.search;
@@ -64,10 +61,16 @@ function isBlocked(urlStr) {
   return false;
 }
 
-const SCRIPTLET_JS = `<script id="proxy-scriptlet-injection">
+const HEAD_INJECT_JS = `<script id="proxy-early-injection">
 (function(){
   'use strict';
   
+  // Register Service Worker IMMEDIATELY (not waiting for load)
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/__proxy-sw.js', { scope: '/' }).catch(function(){});
+  }
+
+  // Defuse Adblock Detectors
   var AP=['adBlockDetected','blockAdBlock','fuckAdBlock','sniffAdBlock','google_ad_status','__ads','_carbonads','adsbygoogle'];
   AP.forEach(function(p){try{if(typeof window[p]==='undefined')
   Object.defineProperty(window,p,{get:function(){return undefined},set:function(){return true},configurable:false})}catch(e){}});
@@ -80,18 +83,27 @@ const SCRIPTLET_JS = `<script id="proxy-scriptlet-injection">
   window.adsbygoogle=window.adsbygoogle||[];
   try{Object.defineProperty(window.adsbygoogle,'push',{value:function(){return this.length},writable:false})}catch(e){}
 
+  // Early Monkey-Patch XHR/Fetch using common regex rules
+  var blockPatterns = [/\\/ads[\\/.?]/i, /\\/ad[\\/.?]/i, /\\/pagead/i, /\\/doubleclick/i, /\\/analytics\\.js/i, /google-analytics/i, /hotjar/i, /facebook\\.com/i];
+  
+  function isBad(url) {
+    if (!url) return false;
+    for (var i=0; i<blockPatterns.length; i++) {
+      if (blockPatterns[i].test(url)) return true;
+    }
+    return false;
+  }
+
   var originalFetch = window.fetch;
   window.fetch = async function(...args) {
     var reqUrl = typeof args[0] === 'string' ? args[0] : args[0]?.url;
-    if (reqUrl && (reqUrl.includes('/ads') || reqUrl.includes('doubleclick.net') || reqUrl.includes('google-analytics.com'))) {
-      return new Response(null, { status: 204 });
-    }
+    if (isBad(reqUrl)) return new Response(null, { status: 204 });
     return originalFetch.apply(this, args);
   };
 
   var originalXHROpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-    if (url && (url.includes('/ads') || url.includes('doubleclick.net') || url.includes('google-analytics.com'))) {
+    if (isBad(url)) {
       this.send = function() { 
         Object.defineProperty(this, 'readyState', {get: function(){return 4}}); 
         if(this.onload) this.onload(); 
@@ -100,12 +112,6 @@ const SCRIPTLET_JS = `<script id="proxy-scriptlet-injection">
     }
     return originalXHROpen.call(this, method, url, ...rest);
   };
-
-  if ('serviceWorker' in navigator) {
-    window.addEventListener('load', function() {
-      navigator.serviceWorker.register('/__proxy-sw.js', { scope: '/' }).catch(function(){});
-    });
-  }
 })();
 </script>`;
 
@@ -128,10 +134,10 @@ function createHtmlTransformStream() {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let headInjected = false;
-  let bodyInjected = false;
   let tailBuffer = '';
 
   const cssToInject = uboCosmeticCSS || `<style id="proxy-cosmetic-fallback">.ad-banner,.ad-container { display: none !important; }</style>`;
+  const headPayload = cssToInject + HEAD_INJECT_JS;
 
   return new TransformStream({
     transform(chunk, controller) {
@@ -139,18 +145,20 @@ function createHtmlTransformStream() {
       tailBuffer = '';
       let text = raw;
 
+      // Inject JS and CSS into the <head> so it loads instantly
       if (!headInjected) {
-        const idx = text.search(/<\/head\s*>/i);
+        const idx = text.search(/<head\s*>/i);
         if (idx !== -1) {
-          text = text.slice(0, idx) + cssToInject + text.slice(idx);
+          const splitIdx = idx + text.match(/<head\s*>/i)[0].length;
+          text = text.slice(0, splitIdx) + headPayload + text.slice(splitIdx);
           headInjected = true;
-        }
-      }
-      if (!bodyInjected) {
-        const idx = text.search(/<\/body\s*>/i);
-        if (idx !== -1) {
-          text = text.slice(0, idx) + SCRIPTLET_JS + text.slice(idx);
-          bodyInjected = true;
+        } else {
+          // fallback if <head> not found, look for </head>
+          const endIdx = text.search(/<\/head\s*>/i);
+          if (endIdx !== -1) {
+            text = text.slice(0, endIdx) + headPayload + text.slice(endIdx);
+            headInjected = true;
+          }
         }
       }
 
@@ -169,12 +177,11 @@ function createHtmlTransformStream() {
       if (tailBuffer.length > 0) {
         let text = tailBuffer;
         if (!headInjected) {
-          const idx = text.search(/<\/head\s*>/i);
-          if (idx !== -1) text = text.slice(0, idx) + cssToInject + text.slice(idx);
-        }
-        if (!bodyInjected) {
-          const idx = text.search(/<\/body\s*>/i);
-          if (idx !== -1) text = text.slice(0, idx) + SCRIPTLET_JS + text.slice(idx);
+          const idx = text.search(/<head\s*>/i);
+          if (idx !== -1) {
+            const splitIdx = idx + text.match(/<head\s*>/i)[0].length;
+            text = text.slice(0, splitIdx) + headPayload + text.slice(splitIdx);
+          }
         }
         text = rewriteUrls(text);
         controller.enqueue(encoder.encode(text));
