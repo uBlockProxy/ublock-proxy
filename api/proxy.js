@@ -11,7 +11,6 @@ try {
 const TARGET_ORIGIN = new URL(TARGET).origin;
 const TARGET_HOST = new URL(TARGET).host;
 
-// Your Github List
 const LIST_URL_BASE = 'https://ublockproxy.github.io/filter-lists';
 
 let uboDomains = new Set();
@@ -62,77 +61,6 @@ function isBlocked(urlStr) {
   return false;
 }
 
-const HEAD_INJECT_JS = `<script id="proxy-early-injection">
-(function(){
-  'use strict';
-  
-  // 1. Service Worker Registration & First-Load Reload Hook
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/__proxy-sw.js', { scope: '/' }).then(function(reg) {
-      reg.addEventListener('updatefound', function() {
-        var newWorker = reg.installing;
-        newWorker.addEventListener('statechange', function() {
-          if (newWorker.state === 'activated' && !navigator.serviceWorker.controller) {
-             // If this is the first visit, the SW just activated. Reload to catch all requests!
-             window.location.reload();
-          }
-        });
-      });
-    }).catch(function(){});
-  }
-
-  // 2. Defuse Adblock Detectors
-  var AP=['adBlockDetected','blockAdBlock','fuckAdBlock','sniffAdBlock','google_ad_status','__ads','_carbonads','adsbygoogle'];
-  AP.forEach(function(p){try{if(typeof window[p]==='undefined')
-  Object.defineProperty(window,p,{get:function(){return undefined},set:function(){return true},configurable:false})}catch(e){}});
-  
-  window.googletag=window.googletag||{cmd:[]};
-  window.googletag.pubads=function(){return{addEventListener:function(){},setTargeting:function(){return this},enableSingleRequest:function(){},collapseEmptyDivs:function(){},refresh:function(){},disableInitialLoad:function(){},getSlots:function(){return[]},clear:function(){},set:function(){return this},get:function(){return null},getAttributeKeys:function(){return[]},updateCorrelator:function(){}}};
-  window.googletag.enableServices=function(){};
-  window.googletag.defineSlot=function(){return{addService:function(){return this},defineSizeMapping:function(){return this},setTargeting:function(){return this}}};
-  window.googletag.display=function(){}; window.googletag.destroySlots=function(){};
-  window.adsbygoogle=window.adsbygoogle||[];
-  try{Object.defineProperty(window.adsbygoogle,'push',{value:function(){return this.length},writable:false})}catch(e){}
-
-  // 3. Early Monkey-Patch XHR/Fetch
-  var blockPatterns = [
-    /ads?[a-z0-9.-]*\\.(google|doubleclick|adcolony|media|twitter|linkedin|pinterest|reddit|youtube|tiktok|yahoo|amazon)\\.com/i,
-    /analytics/i, /track/i, /pixel/i, /stats\\./i, /hotjar/i, /mouseflow/i, /freshmarketer/i,
-    /luckyorange/i, /bugsnag/i, /getsentry/i, /facebook\\.com/i, /yandex/i, /unityads/i, /metrics/i
-  ];
-  
-  function isBad(url) {
-    if (!url) return false;
-    for (var i=0; i<blockPatterns.length; i++) {
-      if (blockPatterns[i].test(url)) return true;
-    }
-    return false;
-  }
-
-  var originalFetch = window.fetch;
-  window.fetch = async function(...args) {
-    var reqUrl = typeof args[0] === 'string' ? args[0] : args[0]?.url;
-    // Simulate a hard network rejection so the tester marks it as BLOCKED
-    if (isBad(reqUrl)) return Promise.reject(new TypeError("Failed to fetch")); 
-    return originalFetch.apply(this, args);
-  };
-
-  var originalXHROpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-    if (isBad(url)) {
-      this.send = function() { 
-        Object.defineProperty(this, 'readyState', {get: function(){return 4}}); 
-        Object.defineProperty(this, 'status', {get: function(){return 0}}); 
-        // Simulate an XHR network crash
-        if(this.onerror) this.onerror(new ProgressEvent("error")); 
-      };
-      return;
-    }
-    return originalXHROpen.call(this, method, url, ...rest);
-  };
-})();
-</script>`;
-
 function rewriteUrls(chunk) {
   let r = chunk;
   r = r.replaceAll('"' + TARGET_ORIGIN + '/', '"/');
@@ -148,13 +76,77 @@ const STRIP_HEADERS = new Set([
   'content-encoding', 'content-length', 'transfer-encoding',
 ]);
 
-function createHtmlTransformStream() {
+function createHtmlTransformStream(domainSet, cssString) {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let headInjected = false;
   let tailBuffer = '';
 
-  const cssToInject = uboCosmeticCSS || `<style id="proxy-cosmetic-fallback">.ad-banner,.ad-container { display: none !important; }</style>`;
+  const swBlocklist = JSON.stringify(Array.from(domainSet));
+  const swPatterns = JSON.stringify(BLOCKED_PATH_PATTERNS.map(p => p.source));
+
+  const HEAD_INJECT_JS = `<script id="proxy-early-injection">
+  (function(){
+    'use strict';
+    
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/__proxy-sw.js', { scope: '/' }).catch(function(){});
+    }
+
+    var AP=['adBlockDetected','blockAdBlock','fuckAdBlock','sniffAdBlock','google_ad_status','__ads','_carbonads','adsbygoogle'];
+    AP.forEach(function(p){try{if(typeof window[p]==='undefined')
+    Object.defineProperty(window,p,{get:function(){return undefined},set:function(){return true},configurable:false})}catch(e){}});
+    
+    window.googletag=window.googletag||{cmd:[]};
+    window.googletag.pubads=function(){return{addEventListener:function(){},setTargeting:function(){return this},enableSingleRequest:function(){},collapseEmptyDivs:function(){},refresh:function(){},disableInitialLoad:function(){},getSlots:function(){return[]},clear:function(){},set:function(){return this},get:function(){return null},getAttributeKeys:function(){return[]},updateCorrelator:function(){}}};
+    window.googletag.enableServices=function(){};
+    window.googletag.defineSlot=function(){return{addService:function(){return this},defineSizeMapping:function(){return this},setTargeting:function(){return this}}};
+    window.googletag.display=function(){}; window.googletag.destroySlots=function(){};
+    window.adsbygoogle=window.adsbygoogle||[];
+    try{Object.defineProperty(window.adsbygoogle,'push',{value:function(){return this.length},writable:false})}catch(e){}
+
+    var BLOCKED_DOMAINS = new Set(${swBlocklist});
+    var patterns = ${swPatterns}.map(function(p){ return new RegExp(p, 'i') });
+
+    function checkBlock(urlStr) {
+      if (!urlStr) return false;
+      try {
+        var u = new URL(urlStr, window.location.href);
+        var parts = u.hostname.toLowerCase().split('.');
+        for (var i = 0; i < parts.length - 1; i++) {
+          if (BLOCKED_DOMAINS.has(parts.slice(i).join('.'))) return true;
+        }
+        var pathQuery = u.pathname + u.search;
+        for (var j = 0; j < patterns.length; j++) {
+          if (patterns[j].test(pathQuery)) return true;
+        }
+      } catch(e) {}
+      return false;
+    }
+
+    var originalFetch = window.fetch;
+    window.fetch = async function(...args) {
+      var reqUrl = typeof args[0] === 'string' ? args[0] : (args[0] ? args[0].url : '');
+      if (checkBlock(reqUrl)) return Promise.reject(new TypeError("Failed to fetch"));
+      return originalFetch.apply(this, args);
+    };
+
+    var originalXHROpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+      if (checkBlock(url)) {
+        this.send = function() { 
+          Object.defineProperty(this, 'readyState', {get: function(){return 4}}); 
+          Object.defineProperty(this, 'status', {get: function(){return 0}}); 
+          if(this.onerror) this.onerror(new ProgressEvent("error")); 
+        };
+        return;
+      }
+      return originalXHROpen.call(this, method, url, ...rest);
+    };
+  })();
+  </script>`;
+
+  const cssToInject = cssString || `<style id="proxy-cosmetic-fallback">.ad-banner,.ad-container { display: none !important; }</style>`;
   const headPayload = cssToInject + HEAD_INJECT_JS;
 
   return new TransformStream({
@@ -241,7 +233,6 @@ export default async function handler(request) {
 
           self.addEventListener('fetch', event => {
             if (checkBlock(event.request.url)) {
-              // Return a hard network error instead of a 204 success
               event.respondWith(Response.error());
             }
           });
@@ -315,7 +306,7 @@ export default async function handler(request) {
       return new Response(upstream.body, { status: upstream.status, headers: rH });
     }
 
-    const ts = createHtmlTransformStream();
+    const ts = createHtmlTransformStream(uboDomains, uboCosmeticCSS);
     upstream.body.pipeThrough(ts);
     rH.delete('content-length');
 
